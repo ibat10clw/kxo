@@ -117,6 +117,16 @@ static struct circ_buf fast_buf;
 
 static char table[N_GRIDS];
 
+/* Insert the whole table into the kfifo buffer */
+static void produce_table(void)
+{
+    unsigned int len = kfifo_in(&rx_fifo, table, sizeof(table));
+    if (unlikely(len < sizeof(table)) && printk_ratelimit())
+        pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(table) - len);
+
+    pr_debug("kxo: %s: in %u/%u bytes\n", __func__, len, kfifo_len(&rx_fifo));
+}
+
 /* Draw the board into draw_buffer */
 static int draw_board(char *table)
 {
@@ -176,13 +186,10 @@ static void drawboard_work_func(struct work_struct *w)
     }
     read_unlock(&attr_obj.lock);
 
-    mutex_lock(&producer_lock);
-    draw_board(table);
-    mutex_unlock(&producer_lock);
 
     /* Store data to the kfifo buffer */
     mutex_lock(&consumer_lock);
-    produce_board();
+    produce_table();
     mutex_unlock(&consumer_lock);
 
     wake_up_interruptible(&rx_wait);
@@ -347,13 +354,9 @@ static void timer_handler(struct timer_list *__timer)
             pr_info("kxo: [CPU#%d] Drawing final board\n", cpu);
             put_cpu();
 
-            mutex_lock(&producer_lock);
-            draw_board(table);
-            mutex_unlock(&producer_lock);
-
             /* Store data to the kfifo buffer */
             mutex_lock(&consumer_lock);
-            produce_board();
+            produce_table();
             mutex_unlock(&consumer_lock);
 
             wake_up_interruptible(&rx_wait);
