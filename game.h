@@ -17,6 +17,12 @@ typedef struct {
     int i_lower_bound, j_lower_bound, i_upper_bound, j_upper_bound;
 } line_t;
 
+struct command {
+    unsigned char pos : BOARD_SIZE;
+    unsigned char turn : 1;
+    unsigned char reset : 1;
+};
+
 /* Self-defined fixed-point type, using last 10 bits as fractional bits,
  * starting from lsb */
 #define FIXED_SCALE_BITS 8

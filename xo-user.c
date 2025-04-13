@@ -82,6 +82,16 @@ static void listen_keyboard_handler(void)
     close(attr_fd);
 }
 static char draw_buffer[DRAWBUFFER_SIZE];
+char board[] =
+    "\n\n"
+    " | | | \n"
+    "-------\n"
+    " | | | \n"
+    "-------\n"
+    " | | | \n"
+    "-------\n"
+    " | | | \n"
+    "-------\n";
 static int draw_board(char *table)
 {
     int i = 0, k = 0;
@@ -99,6 +109,18 @@ static int draw_board(char *table)
         draw_buffer[i++] = '\n';
     }
     return 0;
+}
+static void update_board(int pos, char val)
+{
+    unsigned row = pos >> 2;
+    unsigned col = pos & 3;
+    unsigned index = 2 + (row << 4) + (col << 1);
+    board[index] = val;
+}
+static int reset_board()
+{
+    for (int i = 0; i < N_GRIDS; ++i)
+        update_board(i, ' ');
 }
 int main(int argc, char *argv[])
 {
@@ -132,10 +154,13 @@ int main(int argc, char *argv[])
         } else if (read_attr && FD_ISSET(device_fd, &readset)) {
             FD_CLR(device_fd, &readset);
             printf("\033[H\033[J"); /* ASCII escape code to clear the screen */
-            char table[N_GRIDS];
-            read(device_fd, table, N_GRIDS);
-            draw_board(table);
-            printf("%s", draw_buffer);
+            struct command cmd;
+            read(device_fd, &cmd, sizeof(cmd));
+            update_board(cmd.pos, cmd.turn ? 'X' : 'O');
+            printf("%s", board);
+            if (cmd.reset) {
+                reset_board();
+            }
         }
     }
 

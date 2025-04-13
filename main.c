@@ -41,6 +41,9 @@ struct kxo_attr {
     rwlock_t lock;
 };
 
+#define CMD_INIT(name, pos_val, turn_val, reset_val) \
+    struct command name = {                          \
+        .pos = (pos_val), .turn = (turn_val), .reset = (reset_val)}
 static struct kxo_attr attr_obj;
 
 static ssize_t kxo_state_show(struct device *dev,
@@ -92,12 +95,13 @@ static DEFINE_MUTEX(read_lock);
 /* Wait queue to implement blocking I/O from userspace */
 static DECLARE_WAIT_QUEUE_HEAD(rx_wait);
 
-/* Insert the whole chess board into the kfifo buffer */
-static void produce_board(void)
+static void send_cmd(int pos, int turn, int reset)
 {
-    unsigned int len = kfifo_in(&rx_fifo, draw_buffer, sizeof(draw_buffer));
-    if (unlikely(len < sizeof(draw_buffer)) && printk_ratelimit())
-        pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(draw_buffer) - len);
+    CMD_INIT(cmd, pos, turn, reset);
+    unsigned int len =
+        kfifo_in(&rx_fifo, (const unsigned char *) &cmd, sizeof(cmd));
+    if (unlikely(len < sizeof(cmd)) && printk_ratelimit())
+        pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(cmd) - len);
 
     pr_debug("kxo: %s: in %u/%u bytes\n", __func__, len, kfifo_len(&rx_fifo));
 }
@@ -117,82 +121,10 @@ static struct circ_buf fast_buf;
 
 static char table[N_GRIDS];
 
-/* Insert the whole table into the kfifo buffer */
-static void produce_table(void)
-{
-    unsigned int len = kfifo_in(&rx_fifo, table, sizeof(table));
-    if (unlikely(len < sizeof(table)) && printk_ratelimit())
-        pr_warn("%s: %zu bytes dropped\n", __func__, sizeof(table) - len);
-
-    pr_debug("kxo: %s: in %u/%u bytes\n", __func__, len, kfifo_len(&rx_fifo));
-}
-
-/* Draw the board into draw_buffer */
-static int draw_board(char *table)
-{
-    int i = 0, k = 0;
-    draw_buffer[i++] = '\n';
-    smp_wmb();
-    draw_buffer[i++] = '\n';
-    smp_wmb();
-
-    while (i < DRAWBUFFER_SIZE) {
-        for (int j = 0; j < (BOARD_SIZE << 1) - 1 && k < N_GRIDS; j++) {
-            draw_buffer[i++] = j & 1 ? '|' : table[k++];
-            smp_wmb();
-        }
-        draw_buffer[i++] = '\n';
-        smp_wmb();
-        for (int j = 0; j < (BOARD_SIZE << 1) - 1; j++) {
-            draw_buffer[i++] = '-';
-            smp_wmb();
-        }
-        draw_buffer[i++] = '\n';
-        smp_wmb();
-    }
-
-
-    return 0;
-}
-
 /* Clear all data from the circular buffer fast_buf */
 static void fast_buf_clear(void)
 {
     fast_buf.head = fast_buf.tail = 0;
-}
-
-/* Workqueue handler: executed by a kernel thread */
-static void drawboard_work_func(struct work_struct *w)
-{
-    int cpu;
-
-    /* This code runs from a kernel thread, so softirqs and hard-irqs must
-     * be enabled.
-     */
-    WARN_ON_ONCE(in_softirq());
-    WARN_ON_ONCE(in_interrupt());
-
-    /* Pretend to simulate access to per-CPU data, disabling preemption
-     * during the pr_info().
-     */
-    cpu = get_cpu();
-    pr_info("kxo: [CPU#%d] %s\n", cpu, __func__);
-    put_cpu();
-
-    read_lock(&attr_obj.lock);
-    if (attr_obj.display == '0') {
-        read_unlock(&attr_obj.lock);
-        return;
-    }
-    read_unlock(&attr_obj.lock);
-
-
-    /* Store data to the kfifo buffer */
-    mutex_lock(&consumer_lock);
-    produce_table();
-    mutex_unlock(&consumer_lock);
-
-    wake_up_interruptible(&rx_wait);
 }
 
 static char turn;
@@ -217,8 +149,13 @@ static void ai_one_work_func(struct work_struct *w)
 
     smp_mb();
 
-    if (move != -1)
+    if (move != -1) {
         WRITE_ONCE(table[move], 'O');
+        mutex_lock(&consumer_lock);
+        send_cmd(move, 0, 0);
+        mutex_unlock(&consumer_lock);
+        wake_up_interruptible(&rx_wait);
+    }
 
     WRITE_ONCE(turn, 'X');
     WRITE_ONCE(finish, 1);
@@ -251,8 +188,13 @@ static void ai_two_work_func(struct work_struct *w)
 
     smp_mb();
 
-    if (move != -1)
+    if (move != -1) {
         WRITE_ONCE(table[move], 'X');
+        mutex_lock(&consumer_lock);
+        send_cmd(move, 1, 0);
+        mutex_unlock(&consumer_lock);
+        wake_up_interruptible(&rx_wait);
+    }
 
     WRITE_ONCE(turn, 'O');
     WRITE_ONCE(finish, 1);
@@ -272,7 +214,6 @@ static struct workqueue_struct *kxo_workqueue;
 /* Work item: holds a pointer to the function that is going to be executed
  * asynchronously.
  */
-static DECLARE_WORK(drawboard_work, drawboard_work_func);
 static DECLARE_WORK(ai_one_work, ai_one_work_func);
 static DECLARE_WORK(ai_two_work, ai_two_work_func);
 
@@ -305,7 +246,6 @@ static void game_tasklet_func(unsigned long __data)
         smp_wmb();
         queue_work(kxo_workqueue, &ai_two_work);
     }
-    queue_work(kxo_workqueue, &drawboard_work);
     tv_end = ktime_get();
 
     nsecs = (s64) ktime_to_ns(ktime_sub(tv_end, tv_start));
@@ -356,7 +296,7 @@ static void timer_handler(struct timer_list *__timer)
 
             /* Store data to the kfifo buffer */
             mutex_lock(&consumer_lock);
-            produce_table();
+            send_cmd(0, 0, 1);
             mutex_unlock(&consumer_lock);
 
             wake_up_interruptible(&rx_wait);
